@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "ChatGPT Question Navigator",
+  "version": "0.1.0",
+  "description": "在 ChatGPT 会话右侧展示当前会话的用户问题目录，并支持定位跳转与滚动高亮。",
+  "icons": {
+    "16": "assets/icon-16.png",
+    "32": "assets/icon-32.png",
+    "48": "assets/icon-48.png",
+    "128": "assets/icon-128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*"
+      ],
+      "js": [
+        "src/content/dom-adapter.js",
+        "src/content/sidebar.js",
+        "src/content/index.js"
+      ],
+      "css": [
+        "src/content/styles.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
