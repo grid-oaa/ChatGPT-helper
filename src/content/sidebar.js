@@ -176,6 +176,7 @@
     }
 
     setActive(id) {
+      const previousActiveId = this.activeId;
       this.activeId = id || null;
 
       if (!this.list) {
@@ -187,7 +188,7 @@
         const isActive = button.dataset.questionId === this.activeId;
         button.classList.toggle("is-active", isActive);
 
-        if (isActive) {
+        if (isActive && previousActiveId !== this.activeId) {
           button.scrollIntoView({
             block: "nearest"
           });
