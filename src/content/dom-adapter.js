@@ -7,14 +7,33 @@
     "[data-testid*='conversation-turn-'][data-message-author-role='user']",
     "article [data-message-author-role='user']"
   ];
-  const ROUTE_PATTERN = /^\/c\/[^/]+/i;
-
-  function isConversationRoute() {
-    return ROUTE_PATTERN.test(window.location.pathname);
-  }
+  const KNOWN_CONVERSATION_ROUTE_PATTERNS = [
+    /^\/c\/[^/]+/i,
+    /^\/share\/[^/]+/i,
+    /^\/projects?\/[^/]+(?:\/c\/[^/]+)?/i
+  ];
 
   function getConversationRoot() {
     return document.querySelector("main");
+  }
+
+  function hasKnownConversationRoute() {
+    return KNOWN_CONVERSATION_ROUTE_PATTERNS.some((pattern) =>
+      pattern.test(window.location.pathname)
+    );
+  }
+
+  function isConversationRoute() {
+    const root = getConversationRoot();
+    if (!root) {
+      return hasKnownConversationRoute();
+    }
+
+    if (hasKnownConversationRoute()) {
+      return true;
+    }
+
+    return hasConversationContent(root);
   }
 
   function normalizeTitle(rawText) {
@@ -51,6 +70,19 @@
     return (element?.innerText || "").replace(/\s+/g, "").length;
   }
 
+  function isVisibleConversationBlock(element) {
+    if (!(element instanceof HTMLElement)) {
+      return false;
+    }
+
+    if (element.closest(".chatgpt-helper-sidebar")) {
+      return false;
+    }
+
+    const rect = element.getBoundingClientRect();
+    return rect.height > 24 && rect.width > 120;
+  }
+
   function looksLikeUserTurn(element) {
     if (!(element instanceof HTMLElement)) {
       return false;
@@ -66,7 +98,11 @@
     );
     const textLength = getTextLength(element);
 
-    return Boolean(directRole || nestedRole || editButton || branchButton) && textLength > 0;
+    return (
+      Boolean(directRole || nestedRole || editButton || branchButton) &&
+      textLength > 0 &&
+      isVisibleConversationBlock(element)
+    );
   }
 
   function getPrimaryCandidates(root) {
@@ -95,16 +131,11 @@
         return false;
       }
 
-      if (element.closest(".chatgpt-helper-sidebar")) {
-        return false;
-      }
-
       if (!looksLikeUserTurn(element)) {
         return false;
       }
 
-      const rect = element.getBoundingClientRect();
-      return rect.height > 24 && rect.width > 120;
+      return isVisibleConversationBlock(element);
     });
   }
 
@@ -135,14 +166,22 @@
 
     const contentSelectors = [
       "[data-message-author-role='user'] .whitespace-pre-wrap",
+      "[data-message-author-role='user'] [class*='whitespace-pre-wrap']",
       "[data-message-author-role='user'] [data-testid='user-message']",
       "[data-message-author-role='user'] [dir='auto']",
       "[data-message-author-role='user'] .markdown",
+      "[data-message-author-role='user'] .prose",
       "[data-message-author-role='user'] p",
       "[data-testid*='user-message'] .whitespace-pre-wrap",
+      "[data-testid*='user-message'] [class*='whitespace-pre-wrap']",
       "[data-testid*='user-message'] [dir='auto']",
       "[data-testid*='user-message'] .markdown",
-      "[data-testid*='conversation-turn-'] [dir='auto']"
+      "[data-testid*='user-message'] .prose",
+      "[data-testid*='conversation-turn-'] [dir='auto']",
+      "[data-testid*='conversation-turn-'] .markdown",
+      "[data-message-id] [dir='auto']",
+      "[data-message-id] .markdown",
+      "[data-message-id] .prose"
     ];
 
     for (const selector of contentSelectors) {
@@ -165,20 +204,31 @@
     return cleanedLines[0] || "";
   }
 
-  function buildQuestionItems() {
-    if (!isConversationRoute()) {
-      return [];
-    }
-
-    const root = getConversationRoot();
-    if (!root) {
+  function collectCandidateElements(root) {
+    if (!(root instanceof HTMLElement)) {
       return [];
     }
 
     const primary = getPrimaryCandidates(root);
     const fallback = primary.length ? [] : getFallbackCandidates(root);
     const heuristic = primary.length || fallback.length ? [] : getHeuristicCandidates(root);
-    const candidates = dedupeElements(primary.length ? primary : fallback.length ? fallback : heuristic);
+    return dedupeElements(primary.length ? primary : fallback.length ? fallback : heuristic);
+  }
+
+  function hasConversationContent(root) {
+    return collectCandidateElements(root).length > 0;
+  }
+
+  function buildQuestionItems() {
+    const root = getConversationRoot();
+    if (!root) {
+      return [];
+    }
+
+    const candidates = collectCandidateElements(root);
+    if (!candidates.length) {
+      return [];
+    }
 
     return candidates
       .map((element, index) => {
