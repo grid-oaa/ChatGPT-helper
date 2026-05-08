@@ -8,6 +8,7 @@
 
   const domAdapter = state.domAdapter;
   const sidebarApi = state.sidebar;
+  const messageOutlineApi = state.messageOutline;
 
   if (!domAdapter || !sidebarApi) {
     return;
@@ -16,15 +17,19 @@
   state.appInitialized = true;
 
   let sidebar = null;
+  let messageOutline = null;
   let items = [];
   let activeId = null;
   let currentPath = window.location.pathname;
   let stopObserving = () => {};
+  let stopObservingMessages = () => {};
   let scrollTicking = false;
   let refreshTimer = 0;
   let currentScrollContainer = null;
   let activeLockId = null;
   let activeLockDeadline = 0;
+  let messageOutlineLockId = null;
+  let messageOutlineLockDeadline = 0;
 
   function ensureSidebar() {
     if (!sidebar) {
@@ -33,11 +38,113 @@
           lockActive(item.id);
           domAdapter.scrollToQuestion(item.id);
           setActive(item.id);
+          refreshMessageOutline();
+          window.setTimeout(() => refreshMessageOutline(), 260);
+          window.setTimeout(() => refreshMessageOutline(), 900);
         }
       });
     }
 
     return sidebar;
+  }
+
+  function ensureMessageOutline() {
+    if (!messageOutline && messageOutlineApi?.mount) {
+      messageOutline = messageOutlineApi.mount(document.body, {
+        onSelect(heading) {
+          lockMessageOutlineToHeading(heading);
+          domAdapter.scrollToHeading?.(heading.id);
+          window.setTimeout(() => refreshMessageOutline(), 260);
+        }
+      });
+    }
+
+    return messageOutline;
+  }
+
+  function pickActiveAssistantMessage() {
+    const messages = domAdapter.getAssistantMessages?.() || [];
+    if (!messages.length) {
+      return null;
+    }
+
+    if (messageOutlineLockId && Date.now() < messageOutlineLockDeadline) {
+      const lockedMessage = messages.find((message) => message.id === messageOutlineLockId);
+      if (lockedMessage) {
+        return lockedMessage;
+      }
+    }
+
+    messageOutlineLockId = null;
+    messageOutlineLockDeadline = 0;
+
+    const viewportTop = 120;
+    const viewportBottom = Math.max(window.innerHeight - 160, viewportTop + 120);
+    let best = null;
+    let bestVisibleHeight = 0;
+
+    messages.forEach((message) => {
+      const rect = message.element.getBoundingClientRect();
+      const visibleTop = Math.max(rect.top, viewportTop);
+      const visibleBottom = Math.min(rect.bottom, viewportBottom);
+      const visibleHeight = Math.max(visibleBottom - visibleTop, 0);
+
+      if (visibleHeight <= 0) {
+        return;
+      }
+
+      if (visibleHeight > bestVisibleHeight) {
+        bestVisibleHeight = visibleHeight;
+        best = message;
+      }
+    });
+
+    if (best) {
+      return best;
+    }
+
+    const threshold = viewportTop;
+    let fallback = null;
+    let nearestDistance = Number.POSITIVE_INFINITY;
+
+    messages.forEach((message) => {
+      const rect = message.element.getBoundingClientRect();
+      const distance = Math.abs(rect.top - threshold);
+
+      if (rect.bottom < threshold - 24) {
+        return;
+      }
+
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        fallback = message;
+      }
+    });
+
+    return fallback || messages[messages.length - 1];
+  }
+
+  function refreshMessageOutline() {
+    if (!domAdapter.isConversationRoute()) {
+      messageOutline?.render(null, []);
+      return;
+    }
+
+    const message = pickActiveAssistantMessage();
+    const headings = message
+      ? domAdapter.extractHeadings?.(message.contentElement, message.id) || []
+      : [];
+
+    ensureMessageOutline()?.render(message, headings);
+  }
+
+  function lockMessageOutlineToHeading(heading, duration = 1600) {
+    const message = (domAdapter.getAssistantMessages?.() || []).find((item) => {
+      return item.contentElement?.contains?.(heading.element);
+    });
+
+    messageOutlineLockId = message?.id || null;
+    messageOutlineLockDeadline = messageOutlineLockId ? Date.now() + duration : 0;
   }
 
   function setActive(id) {
@@ -127,6 +234,10 @@
 
     if (!domAdapter.isConversationRoute()) {
       items = [];
+      messageOutline?.destroy();
+      messageOutline = null;
+    } else {
+      refreshMessageOutline();
     }
 
     bindScrollContainer();
@@ -136,6 +247,7 @@
       } else {
         setActive(activeLockId);
         render();
+        refreshMessageOutline();
         return;
       }
     }
@@ -143,6 +255,7 @@
     const active = pickActiveQuestion();
     setActive(active?.id || null);
     render();
+    refreshMessageOutline();
   }
 
   function handleScroll() {
@@ -158,20 +271,28 @@
           releaseActiveLock();
         } else {
           setActive(activeLockId);
+          refreshMessageOutline();
           return;
         }
       }
 
       const active = pickActiveQuestion();
       setActive(active?.id || null);
+      refreshMessageOutline();
     });
   }
 
   function restartObserver() {
     stopObserving();
+    stopObservingMessages();
     stopObserving = domAdapter.observeQuestions((nextItems) => {
       refreshQuestions(nextItems);
     });
+    stopObservingMessages = domAdapter.observeAssistantMessages?.(() => {
+      if (domAdapter.isConversationRoute()) {
+        refreshMessageOutline();
+      }
+    }) || (() => {});
   }
 
   function handleRouteChange() {
@@ -182,6 +303,8 @@
     currentPath = window.location.pathname;
     window.clearTimeout(refreshTimer);
     refreshTimer = window.setTimeout(() => {
+      messageOutline?.destroy();
+      messageOutline = null;
       restartObserver();
       refreshQuestions();
     }, 120);

@@ -1,11 +1,19 @@
 (function initDomAdapter(global) {
   const NAMESPACE = "__CHATGPT_HELPER__";
   const ITEM_ID_PREFIX = "chatgpt-helper-question";
+  const MESSAGE_ID_PREFIX = "chatgpt-helper-message";
+  const HEADING_ID_PREFIX = "chatgpt-helper-heading";
   const USER_SELECTORS = [
     "[data-message-author-role='user']",
     "[data-testid*='user-message']",
     "[data-testid*='conversation-turn-'][data-message-author-role='user']",
     "article [data-message-author-role='user']"
+  ];
+  const ASSISTANT_SELECTORS = [
+    "[data-message-author-role='assistant']",
+    "[data-testid*='assistant-message']",
+    "[data-testid*='conversation-turn-'][data-message-author-role='assistant']",
+    "article [data-message-author-role='assistant']"
   ];
   const KNOWN_CONVERSATION_ROUTE_PATTERNS = [
     /^\/c\/[^/]+/i,
@@ -79,6 +87,10 @@
       return false;
     }
 
+    if (element.closest(".chatgpt-helper-message-outline")) {
+      return false;
+    }
+
     const rect = element.getBoundingClientRect();
     return rect.height > 24 && rect.width > 120;
   }
@@ -105,6 +117,19 @@
     );
   }
 
+  // 判断节点是否像 AI 回复轮次。
+  function looksLikeAssistantTurn(element) {
+    if (!(element instanceof HTMLElement)) {
+      return false;
+    }
+
+    const directRole = element.matches?.("[data-message-author-role='assistant']");
+    const nestedRole = element.querySelector?.("[data-message-author-role='assistant']");
+    const contentElement = findAssistantContentElement(element);
+
+    return Boolean(directRole || nestedRole || contentElement) && isVisibleConversationBlock(element);
+  }
+
   function getPrimaryCandidates(root) {
     const nodes = USER_SELECTORS.flatMap((selector) =>
       Array.from(root.querySelectorAll(selector))
@@ -113,6 +138,43 @@
     return nodes
       .map(findTurnContainer)
       .filter(Boolean);
+  }
+
+  // 使用优先选择器查找 AI 回复候选节点。
+  function getAssistantPrimaryCandidates(root) {
+    const nodes = ASSISTANT_SELECTORS.flatMap((selector) =>
+      Array.from(root.querySelectorAll(selector))
+    );
+
+    return nodes
+      .map(findTurnContainer)
+      .filter(Boolean);
+  }
+
+  // 在优先选择器失效时回退扫描 article 节点。
+  function getAssistantFallbackCandidates(root) {
+    return Array.from(root.querySelectorAll("article")).filter((article) => {
+      return looksLikeAssistantTurn(article);
+    });
+  }
+
+  // 使用启发式规则兜底识别 AI 回复节点。
+  function getAssistantHeuristicCandidates(root) {
+    const candidates = Array.from(
+      root.querySelectorAll("[data-testid^='conversation-turn-'], [data-message-id], article, section")
+    );
+
+    return candidates.filter((element) => {
+      if (!(element instanceof HTMLElement)) {
+        return false;
+      }
+
+      if (looksLikeUserTurn(element) || !looksLikeAssistantTurn(element)) {
+        return false;
+      }
+
+      return isVisibleConversationBlock(element);
+    });
   }
 
   function getFallbackCandidates(root) {
@@ -204,6 +266,35 @@
     return cleanedLines[0] || "";
   }
 
+  // 查找 AI 回复中承载 Markdown 内容的元素。
+  function findAssistantContentElement(element) {
+    if (!(element instanceof HTMLElement)) {
+      return null;
+    }
+
+    const selectors = [
+      "[data-message-author-role='assistant'] .markdown",
+      "[data-message-author-role='assistant'] .prose",
+      "[data-message-author-role='assistant'] [class*='markdown']",
+      "[data-message-author-role='assistant'] [class*='prose']",
+      ".markdown",
+      ".prose"
+    ];
+
+    for (const selector of selectors) {
+      const matched = element.querySelector(selector);
+      if (matched instanceof HTMLElement) {
+        return matched;
+      }
+    }
+
+    const roleElement = element.matches("[data-message-author-role='assistant']")
+      ? element
+      : element.querySelector("[data-message-author-role='assistant']");
+
+    return roleElement instanceof HTMLElement ? roleElement : null;
+  }
+
   function collectCandidateElements(root) {
     if (!(root instanceof HTMLElement)) {
       return [];
@@ -212,6 +303,18 @@
     const primary = getPrimaryCandidates(root);
     const fallback = primary.length ? [] : getFallbackCandidates(root);
     const heuristic = primary.length || fallback.length ? [] : getHeuristicCandidates(root);
+    return dedupeElements(primary.length ? primary : fallback.length ? fallback : heuristic);
+  }
+
+  // 汇总并去重 AI 回复候选节点。
+  function collectAssistantCandidateElements(root) {
+    if (!(root instanceof HTMLElement)) {
+      return [];
+    }
+
+    const primary = getAssistantPrimaryCandidates(root);
+    const fallback = primary.length ? [] : getAssistantFallbackCandidates(root);
+    const heuristic = primary.length || fallback.length ? [] : getAssistantHeuristicCandidates(root);
     return dedupeElements(primary.length ? primary : fallback.length ? fallback : heuristic);
   }
 
@@ -247,6 +350,92 @@
 
   function getQuestionItems() {
     return buildQuestionItems();
+  }
+
+  // 为 AI 回复生成可复用的大纲消息 ID。
+  function getStableMessageId(element, index) {
+    if (!(element instanceof HTMLElement)) {
+      return `${MESSAGE_ID_PREFIX}-${index + 1}`;
+    }
+
+    if (element.dataset.chatgptHelperMessageId) {
+      return element.dataset.chatgptHelperMessageId;
+    }
+
+    const sourceId =
+      element.getAttribute("data-message-id") ||
+      element.querySelector("[data-message-id]")?.getAttribute("data-message-id") ||
+      element.getAttribute("data-testid") ||
+      `${index + 1}`;
+    const id = `${MESSAGE_ID_PREFIX}-${String(sourceId).replace(/[^a-zA-Z0-9_-]+/g, "-")}`;
+    element.dataset.chatgptHelperMessageId = id;
+    return id;
+  }
+
+  // 获取当前会话中可建立大纲的 AI 回复消息。
+  function getAssistantMessages() {
+    const root = getConversationRoot();
+    if (!root) {
+      return [];
+    }
+
+    return collectAssistantCandidateElements(root)
+      .map((element, index) => {
+        const contentElement = findAssistantContentElement(element);
+        if (!contentElement) {
+          return null;
+        }
+
+        return {
+          id: getStableMessageId(element, index),
+          element,
+          contentElement,
+          index
+        };
+      })
+      .filter(Boolean);
+  }
+
+  function assignHeadingId(element, messageId, index) {
+    if (!element.id) {
+      element.id = `${HEADING_ID_PREFIX}-${messageId}-${index + 1}`;
+    }
+
+    return element.id;
+  }
+
+  function buildHeadingItem(element, messageId, index, level, text) {
+    const normalizedText = (text || "").replace(/\s+/g, " ").trim().slice(0, 120);
+    if (!normalizedText) {
+      return null;
+    }
+
+    return {
+      id: assignHeadingId(element, messageId, index),
+      level,
+      text: normalizedText,
+      element,
+      index
+    };
+  }
+
+  // 提取 AI 回复内 h1-h6 标题并补齐稳定锚点。
+  function extractHeadings(contentElement, messageId = "message") {
+    if (!(contentElement instanceof HTMLElement)) {
+      return [];
+    }
+
+    return Array.from(contentElement.querySelectorAll("h1, h2, h3, h4, h5, h6"))
+      .map((element, index) => {
+        return buildHeadingItem(
+          element,
+          messageId,
+          index,
+          Number(element.tagName.slice(1)),
+          element.textContent
+        );
+      })
+      .filter(Boolean);
   }
 
   function isScrollable(element) {
@@ -292,6 +481,100 @@
     return fallback instanceof HTMLElement ? fallback : null;
   }
 
+  function scrollElementWithOffset(target, options = {}) {
+    if (!(target instanceof HTMLElement)) {
+      return false;
+    }
+
+    const container = findScrollContainer(target);
+    const topOffset = Number(options.topOffset) || 96;
+    const behavior = options.behavior || "smooth";
+
+    if (container && container !== document.body && container !== document.documentElement) {
+      const containerRect = container.getBoundingClientRect();
+      const targetRect = target.getBoundingClientRect();
+      const targetTop = targetRect.top - containerRect.top + container.scrollTop - topOffset;
+
+      container.scrollTo({
+        top: Math.max(targetTop, 0),
+        behavior
+      });
+      return true;
+    }
+
+    const targetTop = target.getBoundingClientRect().top + window.scrollY - topOffset;
+    window.scrollTo({
+      top: Math.max(targetTop, 0),
+      behavior
+    });
+    return true;
+  }
+
+  function getTargetOffsetDelta(target, container, topOffset) {
+    if (!(target instanceof HTMLElement)) {
+      return 0;
+    }
+
+    if (container && container !== document.body && container !== document.documentElement) {
+      const containerRect = container.getBoundingClientRect();
+      const targetRect = target.getBoundingClientRect();
+      return targetRect.top - containerRect.top - topOffset;
+    }
+
+    return target.getBoundingClientRect().top - topOffset;
+  }
+
+  function correctScrollUntilSettled(target, options = {}) {
+    const container = findScrollContainer(target);
+    const topOffset = Number(options.topOffset) || 96;
+    const delay = options.delay === undefined ? 420 : Number(options.delay);
+    const duration = options.duration === undefined ? 1200 : Number(options.duration);
+    let stableCount = 0;
+    let startedAt = 0;
+
+    function correct() {
+      if (!(target instanceof HTMLElement)) {
+        return;
+      }
+
+      const delta = getTargetOffsetDelta(target, container, topOffset);
+      if (Math.abs(delta) <= 3) {
+        stableCount += 1;
+      } else {
+        stableCount = 0;
+
+        if (container && container !== document.body && container !== document.documentElement) {
+          container.scrollTo({
+            top: Math.max(container.scrollTop + delta, 0),
+            behavior: "auto"
+          });
+        } else {
+          window.scrollTo({
+            top: Math.max(window.scrollY + delta, 0),
+            behavior: "auto"
+          });
+        }
+      }
+
+      if (stableCount >= 3 || Date.now() - startedAt > duration) {
+        return;
+      }
+
+      window.requestAnimationFrame(correct);
+    }
+
+    const startCorrection = () => {
+      startedAt = Date.now();
+      window.requestAnimationFrame(correct);
+    };
+
+    if (delay <= 0) {
+      startCorrection();
+    } else {
+      window.setTimeout(startCorrection, delay);
+    }
+  }
+
   function scrollToQuestion(id) {
     const target = document.querySelector(
       `[data-chatgpt-helper-question-id='${CSS.escape(id)}']`
@@ -301,37 +584,19 @@
       return false;
     }
 
-    const container = findScrollContainer(target);
+    const scrolled = scrollElementWithOffset(target, { behavior: "auto" });
+    correctScrollUntilSettled(target, { delay: 0 });
+    return scrolled;
+  }
 
-    target.scrollIntoView({
-      behavior: "smooth",
-      block: "start",
-      inline: "nearest"
-    });
-
-    const topOffset = 96;
-    if (container && container !== document.body && container !== document.documentElement) {
-      window.setTimeout(() => {
-        const containerRect = container.getBoundingClientRect();
-        const targetRect = target.getBoundingClientRect();
-        const delta = targetRect.top - containerRect.top - topOffset;
-
-        container.scrollTo({
-          top: Math.max(container.scrollTop + delta, 0),
-          behavior: "smooth"
-        });
-      }, 80);
-    } else {
-      window.setTimeout(() => {
-        const targetTop = target.getBoundingClientRect().top + window.scrollY - topOffset;
-        window.scrollTo({
-          top: Math.max(targetTop, 0),
-          behavior: "smooth"
-        });
-      }, 80);
+  // 平滑滚动到指定标题位置。
+  function scrollToHeading(id) {
+    const target = document.getElementById(id);
+    if (!(target instanceof HTMLElement)) {
+      return false;
     }
 
-    return true;
+    return scrollElementWithOffset(target);
   }
 
   function observeQuestions(onChange) {
@@ -381,11 +646,70 @@
     };
   }
 
+  // 生成 AI 回复标题签名，用于判断是否需要刷新大纲。
+  function getAssistantHeadingSignature() {
+    return getAssistantMessages()
+      .map((message) => {
+        const headings = extractHeadings(message.contentElement, message.id);
+        return `${message.id}:${headings
+          .map((heading) => `${heading.id}:${heading.level}:${heading.text}`)
+          .join(",")}`;
+      })
+      .join("|");
+  }
+
+  // 监听 AI 回复内容变化，支持流式输出时刷新大纲。
+  function observeAssistantMessages(onChange) {
+    const root = getConversationRoot() || document.body;
+    if (!root || typeof onChange !== "function") {
+      return () => {};
+    }
+
+    let frameId = 0;
+    let lastSignature = getAssistantHeadingSignature();
+
+    const observer = new MutationObserver(() => {
+      if (frameId) {
+        cancelAnimationFrame(frameId);
+      }
+
+      frameId = requestAnimationFrame(() => {
+        frameId = 0;
+        const nextSignature = getAssistantHeadingSignature();
+
+        if (nextSignature === lastSignature) {
+          return;
+        }
+
+        lastSignature = nextSignature;
+        onChange();
+      });
+    });
+
+    observer.observe(root, {
+      childList: true,
+      subtree: true,
+      characterData: true
+    });
+
+    return () => {
+      if (frameId) {
+        cancelAnimationFrame(frameId);
+      }
+
+      observer.disconnect();
+    };
+  }
+
   global[NAMESPACE] = global[NAMESPACE] || {};
   global[NAMESPACE].domAdapter = {
+    extractHeadings,
+    getAssistantMessages,
     getQuestionItems,
     getScrollContainer,
+    observeAssistantMessages,
     observeQuestions,
+    scrollToHeading,
     scrollToQuestion,
     isConversationRoute
   };

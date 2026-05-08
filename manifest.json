@@ -17,6 +17,7 @@
       "js": [
         "src/content/dom-adapter.js",
         "src/content/sidebar.js",
+        "src/content/message-outline.js",
         "src/content/index.js"
       ],
       "css": [
